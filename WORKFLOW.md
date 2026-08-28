@@ -1,132 +1,121 @@
-# Alur Kerja dari Awal sampai Akhir
+# Alur Kerja — Dari Video Drone sampai Jadi Model yang Dipakai
 
-Penjelasan gampangnya gimana proyek ini jalan sehari-hari, langkah demi langkah, plus script mana yang dipakai di tiap langkah (folder `scripts/`).
+Dokumen ini jelasin gimana sistem ini jalan sehari-hari, langkah demi langkah, pakai bahasa sesederhana mungkin. Kalau mau lihat ringkasan hasil & cara pakai cepat, buka [README.md](./README.md).
 
-## Diagram alurnya
-
-**Cara buka diagram ini:**
-
-- **VS Code:** langsung buka preview file ini aja (`Ctrl+Shift+V` / `Cmd+Shift+V`) — versi VS Code yang sekarang udah otomatis bisa render Mermaid, nggak perlu install extension apapun. (Kalau versi VS Code-nya lumayan lama dan diagramnya nggak muncul, baru install extension "Markdown Preview Mermaid Support".)
-- **Nggak mau buka VS Code:** copy-paste kode di bawah ke [mermaid.live](https://mermaid.live).
-- **Nggak mau browser juga:** buka `report/workflow_diagram.drawio` langsung pakai aplikasi draw.io atau diagrams.net — diagramnya sama persis, tinggal buka aja.
-- **GitHub:** langsung kebaca otomatis kalau buka file `.md` ini di GitHub, nggak perlu setting apa-apa.
+## Diagram Alurnya
 
 ```mermaid
 flowchart TD
     A[Video drone baru masuk] --> B[Potong jadi frame-frame<br/>pakai ffmpeg]
     B --> C[Pilih frame yang layak dilabeli<br/>dibantu model + sampling acak]
-    C --> D[Import ke Label Studio<br/>label_studio_import.py<br/>pakai API token]
+    C --> D[Import ke Label Studio<br/>label_studio_import.py]
     D --> E{Jalanin auto_label.py<br/>buat task yang belum dilabeli}
     E --> F{Pilih --inference-policy}
-    F -->|vanilla -- default| F1[Satu model v12 aja<br/>satu --conf buat semua]
-    F -->|optimized -- opsional| F2[Threshold beda tiap kelas +<br/>ensemble 4 model khusus Person<br/>v10+v12+v13+v16]
+    F -->|vanilla -- default| F1[Satu model aja<br/>satu ambang keyakinan buat semua kelas]
+    F -->|optimized -- opsional| F2[Ambang beda tiap kelas +<br/>gabungan 4 model khusus buat kelas Orang]
     F1 --> G[Hasil deteksi diubah jadi<br/>format prediction Label Studio]
     F2 --> G
     G --> H[Prediction dikirim lewat API<br/>muncul sebagai kotak draft]
-    H --> I[Reviewer manusia buka task di Label Studio<br/>Kalau kotaknya Bridge atau Person: ada batasan<br/>precision/recall yang perlu diketahui -- lihat<br/>README.md bagian 7, Limitasi 1 dan 2]
+    H --> I[Reviewer manusia buka task<br/>di Label Studio]
     I --> J{Kotaknya udah bener?}
     J -->|Iya| K[Confirm / Submit]
     J -->|Belum| L[Edit atau gambar ulang, baru Submit]
     K --> M[Jadi anotasi resmi]
     L --> M
-    M --> N[Export COCO dari Label Studio]
-    N --> O[prepare_dataset.py<br/>data protected-59 nggak ikut ditraining]
-    O --> P[Training / fine-tune<br/>di GPU 3, server L40S]
-    P --> Q[Dites di protected-59<br/>dibandingin sama model yang lagi dipakai]
-    Q -->|Kelas prioritas membaik<br/>tanpa bikin kelas lain jelek| R[Naik jadi model yang dipakai]
-    Q -->|Belum cukup bagus| S[Tetap pakai model lama,<br/>hasil temuannya dicatat]
+    M --> N[Export data dari Label Studio]
+    N --> O[prepare_dataset.py<br/>data ujian resmi dikeluarkan duluan]
+    O --> P[Training / fine-tune model]
+    P --> Q[Model diuji pakai data ujian resmi<br/>dibandingin sama model yang lagi dipakai]
+    Q -->|Lebih bagus, tanpa<br/>bikin bagian lain jelek| R[Naik jadi model yang dipakai]
+    Q -->|Belum cukup bagus| S[Tetap pakai model lama,<br/>hasil percobaan dicatat]
 ```
 
-Bagian di bawah ini sama kayak diagram di atas, cuma lebih detail — ada beberapa hal teknis dan jebakan yang nggak muat digambar.
+Bagian di bawah ini penjelasan tiap kotak di diagram di atas, lebih detail.
 
-## 1. Video masuk
+---
 
-Rekaman drone mentah masuk ke server Label Studio (<LABEL_STUDIO_SERVER>), dari 2 sumber:
+## 1. Video Drone Masuk
 
-- 111 video awal (`/data/frames`, sudah diekstrak sebelum project ini dimulai)
-- Video baru yang datang belakangan di `/mnt/drone-capture-minio` dan `/mnt/record-output`
+Rekaman drone mentah dari lapangan masuk ke sistem penyimpanan.
 
-## 2. Ekstrak frame — `scripts/extract_frames.py`
+## 2. Potong Jadi Frame — `extract_frames.py`
 
-- Pakai ffmpeg, 1 frame tiap 5 detik per video (samain rate video lama).
-- Disimpan di `/data/frames_new/<nama_folder_video>/frame_NNNNNN.jpg` — sengaja dipisah dari `/data/frames` biar nomor frame nggak tabrakan sama video lama.
-- Kalau kepotong di tengah jalan, bisa dilanjut — video yang udah diekstrak nggak diulang.
+Video dipotong jadi foto-foto diam (screenshot), 1 foto tiap 5 detik, pakai ffmpeg.
 
-## 3. Milih frame yang layak dilabeli
+## 3. Pilih Frame yang Layak Dilabeli
 
-**Cuma ~1,7% dari frame mentah yang ada objeknya** — kalau semua dilabeli manual satu-satu, buang-buang waktu annotator.
+Cuma sekitar **1,7% dari foto mentah** yang beneran ada objeknya — kalau semua difoto dilabeli manual, buang-buang waktu. Makanya dipakai 2 cara sekaligus:
+- Model AI yang udah ada nebak dulu foto mana yang kemungkinan ada objeknya.
+- Ditambah sampel acak, supaya nggak kelewat foto yang salah ditebak modelnya, dan tetap ada contoh foto "kosong" yang sengaja dipilih.
 
-- Dipakai 2 cara sekaligus: model yang sudah ada nebak frame mana yang kemungkinan ada objek, plus sampel acak (biar nggak kelewat yang model-nya salah tebak, dan ada contoh "kosong" yang dipilih sengaja).
-- Hasil: daftar frame kandidat, format `<folder_video>\t<nama_file_frame>\t<alasan/kelas>` dipisah tab.
+## 4. Import ke Label Studio — `label_studio_import.py`
 
-## 4. Import ke Label Studio — `scripts/label_studio_import.py`
+Foto-foto yang kepilih tadi dimasukkan ke sistem pelabelan (Label Studio) lewat API, satu foto jadi satu "task" yang siap dilabeli.
 
-- Ambil daftar kandidat dari langkah 3, bikin 1 task Label Studio per frame lewat REST API (`POST /api/projects/{id}/import`).
-- Syarat: frame harus bisa diakses dari folder media Label Studio (`/data/frames` di-symlink ke `~/label-studio/mydata/media/frames`).
-- Butuh API token di environment variable `LABEL_STUDIO_API_TOKEN` — detail token & setup ada di dalam script, termasuk catatan soal kebocoran token lama yang harus di-rotate.
+## 5–8. Auto-Label — `auto_label.py`
 
-## 5. Anotasi manual
+Ini bagian intinya. Programnya (bukan alat fisik, cuma sekumpulan perintah komputer yang jalan otomatis) ngerjain ini:
 
-Annotator manusia melabeli tiap task lewat tampilan Label Studio — gambar kotak (`rectanglelabels`) buat 6 kelas RGB (Bridge, Car, Motorcycle, Palm_Oil_Fruit, Person, Truck), atau submit kosong kalau frame-nya memang nggak ada objek.
+1. Login ke sistem penyimpanan foto pakai token akses.
+2. Minta daftar foto yang belum ada labelnya.
+3. Ambil satu foto, kasih ke model AI buat ditebak isinya.
+4. Tebakan itu (posisi kotak + nama objek + seberapa yakin) diubah ke format yang dimengerti sistem.
+5. Dikirim balik sebagai **"prediction"** — status ini penting, artinya kotaknya muncul sebagai **draft/usulan**, BUKAN label resmi.
+6. Ulangi buat semua foto di daftar, lalu cetak ringkasan di akhir (berapa berhasil, berapa gagal, berapa banyak tiap jenis objek ketemu).
 
-## 6. Export data
+### Dua Cara Nebak: `vanilla` vs `optimized`
 
-Anotasi yang sudah jadi diambil dari Label Studio, 2 cara:
+| | `vanilla` (default) | `optimized` (opsional) |
+|---|---|---|
+| Jumlah model dipakai | 1 model | 1 model buat 5 kelas, tapi **4 model digabung** khusus buat kelas Orang |
+| Ambang keyakinan | Sama rata semua kelas (0,25) | **Beda-beda tiap kelas**, hasil dari uji coba |
+| Perlu training ulang? | Tidak | Tidak — cuma beda cara pakainya |
 
-- Query database langsung (tabel `task` JOIN `task_completion`, filter `project_id` — contoh query di field `source` pada `data/dataset_summary.json`)
-- API export COCO bawaan (`GET /api/projects/{id}/export?exportType=COCO`) — copy terbaru di `data/annotation_export/`
+**Kenapa ambang keyakinannya dibeda-bedain di mode `optimized`?** Ternyata satu standar yang sama buat semua kelas itu nggak optimal. Contohnya: kelas Truk, Jembatan, Motor, dan Buah Sawit ternyata lebih akurat kalau standarnya dinaikin (lebih ketat) — mengurangi salah tebak tanpa bikin yang bener ikut kebuang. Sementara kelas Mobil udah sempurna dari awal, jadi nggak diubah.
 
-## 7. `scripts/prepare_dataset.py` — ubah dari COCO/anotasi mentah jadi format YOLO
+**Kenapa kelas Orang dapat perlakuan khusus (4 model digabung)?** Karena masalah utama di kelas Orang bukan "suka salah tebak", tapi "sering kelewat nggak kedeteksi". Jadi dipakai cara voting: 4 versi model dijalankan bareng-bareng buat foto yang sama, dan kalau **minimal 2 dari 4 model itu setuju** ada orang di situ, baru dianggap valid. Keempat model ini walau "keturunan" yang sama, masing-masing belajar dengan cara sedikit beda — jadi mereka nggak selalu kelewat kasus yang sama. Kalau 1 model kelewat lihat orang yang jongkok, kemungkinan model lain masih nangkep. Hasilnya: jumlah orang yang berhasil kedeteksi naik lumayan, tanpa bikin kelas lain jadi lebih jelek. Konsekuensinya: proses ini jadi ~4x lebih berat komputasinya khusus buat bagian Orang.
 
-**Aturan paling penting di langkah ini: set validasi terlindungi (59 task ID) dikeluarkan dari data train/val duluan, sebelum data lain diacak.**
+## 9. Reviewer Manusia Buka Task
 
-- Ngubah kotak dari Label Studio (persen ukuran gambar) jadi format YOLO (`cx cy w h` dinormalisasi).
-- Daftar 59 task ID ada di `protected_val_task_ids.txt` (filenya nggak ikut di folder scripts deliverable ini, tapi dipanggil sama script — daftar ini permanen, nggak pernah diganti).
-- Kenapa penting: versi lama (v9) pernah kejadian data validasinya kecampur ke data training, jadi angka yang dilaporkan waktu itu nggak valid (kelihatan bagus padahal cuma "nyontek"). Berkat set terlindungi ini, angka dari v10 dan seterusnya baru bisa dibandingin adil.
-- Hasil akhir: folder `images/{train,val,val_protected}` + `labels/{train,val,val_protected}`, plus 2 file YAML (satu buat training biasa dengan val gabungan, satu lagi val-nya cuma 59 data terlindungi buat perbandingan antar versi).
+Manusia buka Label Studio, lihat kotak-kotak draft tadi satu-satu.
 
-## 8. Training
+## 10. Kotaknya Udah Bener?
 
-- YOLOv8, fine-tune dari checkpoint terbaik sebelumnya kalau ada (v12 = fine-tune dari turunan v10; model thermal = training dari dasar YOLOv8n pakai data HIT-UAV).
-- **Aturan wajib: cuma boleh di server L40S (<GPU_SERVER>), khusus GPU 3.** GPU 0/1/2 nggak boleh dipakai sama sekali walaupun lagi nganggur.
+- **Iya** → langsung confirm/submit.
+- **Belum** → diedit atau digambar ulang dulu, baru submit.
 
-## 9. Evaluasi pakai data protected-59
+## 11. Jadi Anotasi Resmi
 
-**Wajib: `model.val(data=dataset_protected_val.yaml, conf=0.25, plots=True)` — `conf=0.25` dan `plots=True` harus ditulis eksplisit, jangan dibiarkan default.**
+Baru di titik ini datanya resmi jadi label yang bisa dipercaya dan dipakai buat melatih model berikutnya.
 
-- Kalau `conf=` nggak ditulis: ultralytics pakai default yang kerendahan, bikin jumlah "salah deteksi" di confusion matrix keliatan jauh lebih banyak dari kenyataan.
-- Kalau `plots=False`: confusion matrix keluar kosong semua (isinya nol), walaupun precision/recall/mAP tetap kehitung bener.
-- Semua angka di `report/PROGRESS_REPORT.md` dan confusion matrix di `report/confusion_matrices/` udah ngikutin aturan ini.
+### Kenapa Nggak Langsung Jadi Anotasi Resmi?
 
-## 10. Auto-label task baru — `scripts/auto_label.py`
+Secara teknis bisa aja programnya diubah buat langsung nyimpen tebakan jadi label resmi tanpa nunggu manusia. Tapi ini sengaja nggak dilakukan, karena 2 alasan:
 
-Jalanin model yang sudah ditraining buat prediksi task di Label Studio, hasilnya dikirim balik sebagai **prediction** (kotak draft yang masih perlu dicek/diedit manusia, BUKAN anotasi final) lewat `POST /api/predictions/` — endpoint resmi yang bikin `total_predictions` di Label Studio ke-update dengan benar.
+1. **Kalau salah, kesalahannya ikut "disahkan".** Buat kelas Jembatan, dari tiap 3 tebakan, kira-kira 1 itu salah. Kalau langsung disahkan tanpa dicek, data yang salah itu bisa ikut kepakai lagi buat melatih model berikutnya — bikin masalahnya nular ke model generasi selanjutnya.
+2. **Masalah yang lebih besar: sering kelewatan, bukan cuma salah tebak.** Buat kelas Orang, dari 3 orang yang beneran ada di foto, sistem cuma berhasil nebak 1. Auto-submit sama sekali nggak nolong ini — dia cuma bisa "mengesahkan" kotak yang udah ada, sedangkan yang kelewat ya tetap kelewat, nggak ada kotak yang bisa disetujui buat kasus itu.
 
-- Default: model RGB v12 yang lagi dipakai, confidence 0.25.
-- Mau pakai checkpoint lain (misal model thermal): tinggal kasih flag `--weights`.
-- Detail lengkap ada di dalam script itu sendiri.
+Jadi review manusia bukan formalitas — itu yang mencegah data salah/kurang lengkap ikut jadi "kebenaran resmi" yang dipakai berulang-ulang.
 
-**Flag `--inference-policy vanilla|optimized`, default `vanilla`:**
+## 12. Export Data dari Label Studio
 
-- Kodenya `optimized` ada di `runs/v12_optimized_inference/`, detail lengkap di `report/inference_validation/VALIDATION_REPORT.md`.
-- Opsional — kalau flag nggak ditulis, perilakunya persis sama kayak sebelum flag ini ada.
-- Perbandingan lengkap: `README.md` bagian 6.
-- Dua-duanya (vanilla dan optimized) menghasilkan bentuk data prediction yang sama persis — langkah review di bawah tetap sama aja mau pakai yang mana.
+Data yang udah dilabeli resmi diambil keluar, siap diolah jadi format buat training.
 
-**Waktu ngecek kotak draft (langkah accept/reject di diagram):** kalau itu prediksi kelas **Bridge** atau **Person**, cek dulu README.md bagian 7, Limitasi 1 dan 2, sebelum di-confirm atau ditolak. Ini bukan catatan kaki yang dibaca sekali terus dilupain — ini justru alasan kenapa Limitasi 7 bikin review manusia wajib buat SEMUA prediction, bukan cuma yang kelihatan ragu-ragu.
+## 13. `prepare_dataset.py` — Ubah ke Format Training
 
-### Kenapa nggak dibikin auto-submit semua aja, tanpa perlu direview satu-satu?
+**Aturan paling penting di sini:** ada satu kumpulan foto khusus yang dijadiin "soal ujian resmi" — dikeluarkan dari data latihan **sebelum** data lain diacak dan dibagi. Foto-foto ini dikunci permanen, nggak pernah dipakai buat latihan sama sekali.
 
-**Secara teknis bisa — tapi sengaja belum dibikin, karena precision/recall model belum cukup buat dipercaya tanpa dicek manusia.**
+Kenapa penting? Karena ini yang bikin pengujian model jadi jujur — model nggak pernah "melihat" soal ujiannya duluan. Detail lebih lengkap soal kenapa ini krusial (termasuk insiden yang pernah kejadian kalau ini dilanggar) ada di README.md bagian batasan.
 
-- `auto_label.py` tinggal diubah buat langsung bikin annotation final (endpoint annotation Label Studio), bukan cuma ngirim prediction draft kayak sekarang.
-- **Precision masih ada salahnya, dan auto-confirm bakal ikut jadiin itu "kebenaran":** Bridge precision cuma **0,667** di conf=0,25 — sekitar **1 dari 3 kotak Bridge yang diprediksi itu salah** (README.md bagian 4). Kalau di-auto-confirm tanpa dicek, sepertiga dari situ jadi anotasi resmi yang salah, dan bisa nyemari data training versi berikutnya — persis jenis masalah yang udah dua kali bikin project ini rugi (bug kebocoran v9, bug tabrakan frame — `report/PROGRESS_REPORT.md` bagian 1.1 dan 1.3).
-- **Auto-confirm nggak nolong masalah kelewat deteksi (recall) sama sekali:** recall Person cuma **0,333** di threshold yang sama — sekitar **2 dari 3 orang yang beneran ada di foto nggak pernah kedeteksi model**, jadi nggak ada kotak yang bisa di-auto-confirm buat kasus itu. Auto-submit cuma "meloloskan" kotak yang udah diprediksi, nggak bisa nambahin yang kelewat. Buat pencegahan pencurian, ini risiko yang lebih penting dari salah deteksi.
-- **Data yang dites masih kecil** (protected-59, cuma 76 objek total) — angka precision/recall di atas itu perkiraan yang belum tentu presisi berlaku ke semua kasus lapangan (README.md bagian 7, Limitasi 3).
+## 14. Training
 
-**Jalan tengah yang belum dicoba:** auto-confirm cuma buat kombinasi kelas+confidence yang precision-nya udah kebukti tinggi (misal Car/Motorcycle di confidence tinggi), Bridge/Person tetap wajib direview manual. **Belum diimplementasikan dan belum divalidasi** — kalau mau dicoba, itu perubahan baru yang perlu dites dan dibuktikan dulu, bukan langsung dianggap aman.
+Model dilatih (atau dilanjutkan dari model sebelumnya) pakai data latihan yang udah disiapin.
 
-**Ngetes policy sebelum dipakai beneran** (di luar alur rutin di atas, tapi bagian dari gimana `optimized` bisa dibilang "sudah teruji"):
+## 15. Model Diuji
 
-- `scripts/build_clean_val_set.py` bikin set data terpisah dari protected-59, khusus buat coba-coba threshold (`eval_sets/clean_236/` — sengaja keluarin protected-59 dengan cocokin nama file + checksum md5, soalnya `images/val` diam-diam sudah termasuk protected-59 — lihat `report/PROGRESS_REPORT.md` bagian 5.1).
-- `scripts/test_auto_label_policy.py` — tes otomatis buat `auto_label.py`, nggak butuh internet, ngecek flag `--inference-policy`, threshold, dan susunan ensemble. Jalanin ini tiap habis ngubah script, sebelum dipercaya dipakai.
+Model yang baru dilatih dites pakai "soal ujian resmi" tadi, dibandingin hasilnya sama model yang lagi dipakai sekarang.
+
+## 16. Keputusan Akhir
+
+- Kalau **kelas-kelas prioritas membaik tanpa bikin kelas lain jadi jelek** → model baru naik jadi yang dipakai.
+- Kalau **belum cukup bagus** → tetap pakai model lama, hasil percobaannya dicatat sebagai pelajaran buat percobaan berikutnya.
